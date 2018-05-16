@@ -15,9 +15,12 @@
 package g
 
 import (
-	"github.com/garyburd/redigo/redis"
 	"log"
+	"strings"
 	"time"
+
+	"github.com/garyburd/redigo/redis"
+	"github.com/open-falcon/falcon-plus/common/sentinel"
 )
 
 var RedisConnPool *redis.Pool
@@ -35,17 +38,50 @@ func InitRedisConnPool() {
 	readTimeout := time.Duration(Config().Alarm.Redis.ReadTimeout) * time.Millisecond
 	writeTimeout := time.Duration(Config().Alarm.Redis.WriteTimeout) * time.Millisecond
 
-	RedisConnPool = &redis.Pool{
-		MaxIdle:     maxIdle,
-		IdleTimeout: idleTimeout,
-		Dial: func() (redis.Conn, error) {
-			c, err := redis.DialTimeout("tcp", dsn, connTimeout, readTimeout, writeTimeout)
-			if err != nil {
-				return nil, err
-			}
-			return c, err
-		},
-		TestOnBorrow: PingRedis,
+	if len(strings.Split(dsn, ",")) > 1 {
+		sntnl := &sentinel.Sentinel{
+			Addrs:      strings.Split(dsn, ","),
+			MasterName: "redismaster",
+			Dial: func(addr string) (redis.Conn, error) {
+				c, err := redis.DialTimeout("tcp", addr, connTimeout, readTimeout, writeTimeout)
+				if err != nil {
+					return nil, err
+				}
+				return c, nil
+			},
+		}
+		RedisConnPool = &redis.Pool{
+			MaxIdle:     maxIdle,
+			IdleTimeout: idleTimeout,
+			Dial: func() (redis.Conn, error) {
+				masterAddr, err := sntnl.MasterAddr()
+				if err != nil {
+					return nil, err
+				}
+				c, err := redis.Dial("tcp", masterAddr)
+				if err != nil {
+					return nil, err
+				}
+				return c, err
+			},
+			TestOnBorrow: PingRedis,
+		}
+	}else{
+		RedisConnPool = &redis.Pool{
+			MaxIdle:     maxIdle,
+			IdleTimeout: idleTimeout,
+			Dial: func() (redis.Conn, error) {
+				masterAddr, err := sntnl.MasterAddr()
+				if err != nil {
+					return nil, err
+				}
+				c, err := redis.DialTimeout("tcp", dsn, connTimeout, readTimeout, writeTimeout)
+				if err != nil {
+					return nil, err
+				}
+				return c, err
+			},
+			TestOnBorrow: PingRedis,
 	}
 }
 
@@ -53,6 +89,11 @@ func PingRedis(c redis.Conn, t time.Time) error {
 	_, err := c.Do("ping")
 	if err != nil {
 		log.Println("[ERROR] ping redis fail", err)
+	}
+	if !sentinel.TestRole(c, "master") {
+		return errors.New("Role check failed")
+	} else {
+		return nil
 	}
 	return err
 }

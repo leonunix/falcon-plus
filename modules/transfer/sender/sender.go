@@ -16,13 +16,14 @@ package sender
 
 import (
 	"fmt"
+	"log"
+
 	backend "github.com/open-falcon/falcon-plus/common/backend_pool"
 	cmodel "github.com/open-falcon/falcon-plus/common/model"
 	"github.com/open-falcon/falcon-plus/modules/transfer/g"
 	"github.com/open-falcon/falcon-plus/modules/transfer/proc"
 	rings "github.com/toolkits/consistent/rings"
 	nlist "github.com/toolkits/container/list"
-	"log"
 )
 
 const (
@@ -44,9 +45,10 @@ var (
 // 发送缓存队列
 // node -> queue_of_data
 var (
-	TsdbQueue   *nlist.SafeListLimited
-	JudgeQueues = make(map[string]*nlist.SafeListLimited)
-	GraphQueues = make(map[string]*nlist.SafeListLimited)
+	TsdbQueue      *nlist.SafeListLimited
+	JudgeQueues    = make(map[string]*nlist.SafeListLimited)
+	GraphQueues    = make(map[string]*nlist.SafeListLimited)
+	InfluxdbQueues = make(map[string]*nlist.SafeListLimited)
 )
 
 // 连接池
@@ -55,6 +57,7 @@ var (
 	JudgeConnPools     *backend.SafeRpcConnPools
 	TsdbConnPoolHelper *backend.TsdbConnPoolHelper
 	GraphConnPools     *backend.SafeRpcConnPools
+	InfluxdbConnPools  *backend.InfluxdbConnPools
 )
 
 // 初始化数据发送服务, 在main函数中调用
@@ -211,4 +214,31 @@ func convert2TsdbItem(d *cmodel.MetaData) *cmodel.TsdbItem {
 
 func alignTs(ts int64, period int64) int64 {
 	return ts - ts%period
+}
+
+// push data to influxdb queue
+func Push2InfluxdbSendQueue(items []*cmodel.MetaData) {
+	for _, item := range items {
+		// align ts
+		step := int(item.Step)
+		if step < MinStep {
+			step = MinStep
+		}
+		ts := alignTs(item.Timestamp, int64(step))
+
+		influxdbItem := &cmodel.InfluxdbItem{
+			Endpoint:  item.Endpoint,
+			Metric:    item.Metric,
+			Value:     item.Value,
+			Timestamp: ts,
+			Tags:      item.Tags,
+		}
+		Q := InfluxdbQueues["default"]
+		isSuccess := Q.PushFront(influxdbItem)
+
+		// statistics
+		if !isSuccess {
+			proc.SendToInfluxdbDropCnt.Incr()
+		}
+	}
 }
